@@ -3,7 +3,6 @@ import idleUrl from '../../../assets/concept_art/sprites/01_idle_front.png?url'
 import left1Url from '../../../assets/concept_art/sprites/walking_left_1.png?url'
 import left2Url from '../../../assets/concept_art/sprites/walking_left_2.png?url'
 import left3Url from '../../../assets/concept_art/sprites/walking_left_3.png?url'
-import left4Url from '../../../assets/concept_art/sprites/walking_left_4.png?url'
 import left5Url from '../../../assets/concept_art/sprites/walking_left_5.png?url'
 import left6Url from '../../../assets/concept_art/sprites/walking_left_6.png?url'
 import up1Url from '../../../assets/concept_art/sprites/walking_up_1.png?url'
@@ -24,15 +23,21 @@ import { worldToScreen } from '../iso'
 const TARGET_H = TILE_H * 3
 const IDLE_TIMEOUT_MS = 150
 
-// Starting tile for the static AI character — placed visibly to the world-east
-// of the player so a fresh player can immediately see them and walk into them.
 const AI_SPAWN_TILE = { x: 35, y: 32 }
+const AI_TINT = 0xff8888
 
 type Dir = 'up' | 'down' | 'left' | 'right'
+
+// tryMove's outcome: callers (and future planners) can distinguish "off the
+// arena" from "another entity is there" without a second predicate.
+type MoveResult = 'moved' | 'oob' | 'blocked'
 
 type Entity = {
   tile: { x: number; y: number }
   sprite: Phaser.GameObjects.Sprite
+  lastDir: Dir | null
+  currentAnimKey: string | null
+  lastMoveAt: number
 }
 
 const ANIM_FOR_DIR: Record<Dir, 'walk_up' | 'walk_down' | 'walk_left'> = {
@@ -42,7 +47,9 @@ const ANIM_FOR_DIR: Record<Dir, 'walk_up' | 'walk_down' | 'walk_left'> = {
   right: 'walk_left',
 }
 
-// First frame of each direction's walk cycle doubles as a standing-still pose.
+// First frame of each direction doubles as the standing-still pose. left/right
+// reuse walk_left_1 (front-facing standing) since side-facing idle art doesn't
+// exist yet; flipX picks left vs right.
 const RESTING_FRAME_FOR_DIR: Record<Dir, string> = {
   up: 'walk_up_1',
   down: 'walk_down_1',
@@ -63,12 +70,12 @@ const WALK_FPS: Record<keyof typeof WALK_FRAMES, number> = {
 }
 
 export class ArenaScene extends Phaser.Scene {
+  // Authoritative entity list; `player` is a convenience alias into this.
+  // Re-initialized in create() because Phaser reuses the Scene instance on restart.
+  // The AI Entity is currently only reachable via `entities` — when AI control
+  // is wired up, capture it into a `private ai!: Entity` field at spawn time.
+  private entities: Entity[] = []
   private player!: Entity
-  private ai!: Entity
-  private lastMoveAt = 0
-  private moving = false
-  private currentAnimKey: string | null = null
-  private lastDir: Dir | null = null
   private heldKeys = new Set<string>()
 
   constructor() {
@@ -80,7 +87,6 @@ export class ArenaScene extends Phaser.Scene {
     this.load.image('walk_left_1', left1Url)
     this.load.image('walk_left_2', left2Url)
     this.load.image('walk_left_3', left3Url)
-    this.load.image('walk_left_4', left4Url)
     this.load.image('walk_left_5', left5Url)
     this.load.image('walk_left_6', left6Url)
     this.load.image('walk_up_1', up1Url)
@@ -98,11 +104,7 @@ export class ArenaScene extends Phaser.Scene {
   }
 
   create() {
-    // Phaser reuses the Scene instance across restarts; re-init per-run state.
-    this.lastMoveAt = 0
-    this.moving = false
-    this.currentAnimKey = null
-    this.lastDir = null
+    this.entities = []
     this.heldKeys.clear()
 
     this.cameras.main.setBackgroundColor('#222222')
@@ -110,7 +112,7 @@ export class ArenaScene extends Phaser.Scene {
     this.drawArena()
 
     this.player = this.spawnEntity(START_TILE.x, START_TILE.y)
-    this.ai = this.spawnEntity(AI_SPAWN_TILE.x, AI_SPAWN_TILE.y)
+    this.spawnEntity(AI_SPAWN_TILE.x, AI_SPAWN_TILE.y, { tint: AI_TINT })
 
     for (const key of Object.keys(WALK_FRAMES) as Array<keyof typeof WALK_FRAMES>) {
       if (!this.anims.exists(key)) {
@@ -122,9 +124,6 @@ export class ArenaScene extends Phaser.Scene {
         })
       }
     }
-
-    // Only the player runs animations right now; AI is static.
-    this.player.sprite.on('animationupdate', () => this.resizeSprite(this.player.sprite))
 
     const halfW = (GRID_SIZE * TILE_W) / 2
     const fullH = GRID_SIZE * TILE_H
@@ -139,35 +138,25 @@ export class ArenaScene extends Phaser.Scene {
     const keyboard = this.input.keyboard
     if (!keyboard) return
 
-    // Track held keys with a Set (no addKey/addKeys: that would make Phaser
-    // suppress repeat 'keydown-X' events, so holding a key would only move once).
-    keyboard.on('keydown-W', () => { this.heldKeys.add('W'); if (this.tryMove(0, -1)) this.startWalk('up') })
-    keyboard.on('keydown-S', () => { this.heldKeys.add('S'); if (this.tryMove(0, 1))  this.startWalk('down') })
-    keyboard.on('keydown-A', () => { this.heldKeys.add('A'); if (this.tryMove(-1, 0)) this.startWalk('left') })
-    keyboard.on('keydown-D', () => { this.heldKeys.add('D'); if (this.tryMove(1, 0))  this.startWalk('right') })
+    keyboard.on('keydown-W', () => this.handleDirKey('W', this.player, 'up', 0, -1))
+    keyboard.on('keydown-S', () => this.handleDirKey('S', this.player, 'down', 0, 1))
+    keyboard.on('keydown-A', () => this.handleDirKey('A', this.player, 'left', -1, 0))
+    keyboard.on('keydown-D', () => this.handleDirKey('D', this.player, 'right', 1, 0))
     keyboard.on('keyup-W', () => this.heldKeys.delete('W'))
     keyboard.on('keyup-S', () => this.heldKeys.delete('S'))
     keyboard.on('keyup-A', () => this.heldKeys.delete('A'))
     keyboard.on('keyup-D', () => this.heldKeys.delete('D'))
   }
 
-  update(time: number) {
-    if (!this.moving) return
-    if (this.heldKeys.size > 0) return
-    if (time - this.lastMoveAt <= IDLE_TIMEOUT_MS) return
-
-    const sprite = this.player.sprite
-    sprite.stop()
-    if (this.lastDir === null) {
-      sprite.setTexture('idle')
-      sprite.setFlipX(false)
-    } else {
-      sprite.setTexture(RESTING_FRAME_FOR_DIR[this.lastDir])
-      sprite.setFlipX(this.lastDir === 'right')
+  update(time: number, _delta: number) {
+    for (const e of this.entities) {
+      if (e.currentAnimKey === null) continue
+      // Player-only: respect heldKeys so OS initial-repeat delay (up to ~250 ms
+      // on X11) doesn't flicker idle/walk before the second keydown arrives.
+      if (e === this.player && this.heldKeys.size > 0) continue
+      if (time - e.lastMoveAt <= IDLE_TIMEOUT_MS) continue
+      this.stopWalk(e)
     }
-    this.resizeSprite(sprite)
-    this.moving = false
-    this.currentAnimKey = null
   }
 
   private drawArena() {
@@ -193,50 +182,93 @@ export class ArenaScene extends Phaser.Scene {
     }
   }
 
-  private spawnEntity(tx: number, ty: number): Entity {
+  private spawnEntity(tx: number, ty: number, opts?: { tint?: number }): Entity {
+    if (tx < 0 || tx >= GRID_SIZE || ty < 0 || ty >= GRID_SIZE) {
+      throw new Error(`spawnEntity: tile (${tx},${ty}) out of bounds for ${GRID_SIZE}x${GRID_SIZE} arena`)
+    }
+    if (this.isOccupied(tx, ty)) {
+      throw new Error(`spawnEntity: tile (${tx},${ty}) is already occupied`)
+    }
     const { sx, sy } = worldToScreen(tx, ty)
     const sprite = this.add.sprite(sx, sy, 'idle').setOrigin(0.5, 1)
+    if (opts?.tint !== undefined) sprite.setTint(opts.tint)
     this.resizeSprite(sprite)
-    const entity: Entity = { tile: { x: tx, y: ty }, sprite }
+    // Listener belongs on every entity sprite, not just the player's, so
+    // future animated entities (the AI once it gets behavior, NPCs, etc.) get
+    // per-frame aspect-ratio correction for free.
+    sprite.on('animationupdate', () => this.resizeSprite(sprite))
+    const entity: Entity = {
+      tile: { x: tx, y: ty },
+      sprite,
+      lastDir: null,
+      currentAnimKey: null,
+      lastMoveAt: 0,
+    }
     this.updateDepth(entity)
+    this.entities.push(entity)
     return entity
   }
 
-  // Iso depth: characters with feet lower on screen are closer to the viewer
-  // and must render on top. Setting depth = screen-y of the sprite's feet
-  // achieves that with a single ordering function.
-  private updateDepth(e: Entity) {
-    const { sy } = worldToScreen(e.tile.x, e.tile.y)
-    e.sprite.setDepth(sy)
-  }
-
   private isOccupied(tx: number, ty: number, exclude?: Entity): boolean {
-    for (const e of [this.player, this.ai]) {
-      if (!e || e === exclude) continue
+    for (const e of this.entities) {
+      if (e === exclude) continue
       if (e.tile.x === tx && e.tile.y === ty) return true
     }
     return false
   }
 
-  private startWalk(dir: Dir) {
-    const flip = dir === 'right'
-    const animKey = ANIM_FOR_DIR[dir]
-    const sprite = this.player.sprite
-    sprite.setFlipX(flip)
-    this.lastDir = dir
-    if (!this.moving || this.currentAnimKey !== animKey) {
-      sprite.play(animKey)
-      // Phaser skips ANIMATION_UPDATE for the first frame of a freshly-played anim;
-      // size it explicitly so frame 1 isn't drawn at the previous texture's aspect.
-      this.resizeSprite(sprite)
-      this.currentAnimKey = animKey
-      this.moving = true
-    }
-    this.bumpMoved()
+  // Iso depth: feet-of-sprite lower on screen renders on top. Multiplying sy
+  // by 100 leaves room for tile.x as a deterministic tie-breaker, so two
+  // entities on the same iso row don't z-fight by display-list order.
+  private updateDepth(e: Entity) {
+    const { sy } = worldToScreen(e.tile.x, e.tile.y)
+    e.sprite.setDepth(sy * 100 + e.tile.x)
   }
 
-  private bumpMoved() {
-    this.lastMoveAt = this.time.now
+  private handleDirKey(keyName: string, e: Entity, dir: Dir, dx: number, dy: number) {
+    this.heldKeys.add(keyName)
+    // Face the direction even on blocked moves so the resting pose reflects intent.
+    this.setFacing(e, dir)
+    const result = this.tryMove(e, dx, dy)
+    if (result === 'moved') {
+      this.startWalk(e, dir)
+    } else if (e.currentAnimKey !== null) {
+      // Blocked or out-of-bounds while moving: stop the walk anim instead of
+      // letting it march in place until the key is released.
+      this.stopWalk(e)
+    }
+  }
+
+  private setFacing(e: Entity, dir: Dir) {
+    e.lastDir = dir
+    e.sprite.setFlipX(dir === 'right')
+  }
+
+  private startWalk(e: Entity, dir: Dir) {
+    const animKey = ANIM_FOR_DIR[dir]
+    if (e.currentAnimKey !== animKey) {
+      e.sprite.play(animKey)
+      // Phaser skips ANIMATION_UPDATE for the first frame of a freshly-played
+      // anim, so size it explicitly to avoid drawing frame 1 at the previous
+      // texture's aspect.
+      this.resizeSprite(e.sprite)
+      e.currentAnimKey = animKey
+    }
+    e.lastMoveAt = this.time.now
+  }
+
+  private stopWalk(e: Entity) {
+    if (e.currentAnimKey === null) return
+    e.sprite.stop()
+    if (e.lastDir === null) {
+      e.sprite.setTexture('idle')
+      e.sprite.setFlipX(false)
+    } else {
+      e.sprite.setTexture(RESTING_FRAME_FOR_DIR[e.lastDir])
+      e.sprite.setFlipX(e.lastDir === 'right')
+    }
+    this.resizeSprite(e.sprite)
+    e.currentAnimKey = null
   }
 
   private resizeSprite(sprite: Phaser.GameObjects.Sprite) {
@@ -244,15 +276,15 @@ export class ArenaScene extends Phaser.Scene {
     sprite.setDisplaySize(TARGET_H * aspect, TARGET_H)
   }
 
-  private tryMove(dx: number, dy: number): boolean {
-    const nx = this.player.tile.x + dx
-    const ny = this.player.tile.y + dy
-    if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE) return false
-    if (this.isOccupied(nx, ny, this.player)) return false
-    this.player.tile = { x: nx, y: ny }
+  private tryMove(e: Entity, dx: number, dy: number): MoveResult {
+    const nx = e.tile.x + dx
+    const ny = e.tile.y + dy
+    if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE) return 'oob'
+    if (this.isOccupied(nx, ny, e)) return 'blocked'
+    e.tile = { x: nx, y: ny }
     const { sx, sy } = worldToScreen(nx, ny)
-    this.player.sprite.setPosition(sx, sy)
-    this.updateDepth(this.player)
-    return true
+    e.sprite.setPosition(sx, sy)
+    this.updateDepth(e)
+    return 'moved'
   }
 }
