@@ -26,13 +26,6 @@ const IDLE_TIMEOUT_MS = 150
 
 type Dir = 'up' | 'down' | 'left' | 'right'
 
-type WasdKeys = {
-  W: Phaser.Input.Keyboard.Key
-  A: Phaser.Input.Keyboard.Key
-  S: Phaser.Input.Keyboard.Key
-  D: Phaser.Input.Keyboard.Key
-}
-
 const ANIM_FOR_DIR: Record<Dir, 'walk_up' | 'walk_down' | 'walk_left'> = {
   up: 'walk_up',
   down: 'walk_down',
@@ -61,7 +54,7 @@ export class ArenaScene extends Phaser.Scene {
   private moving = false
   private currentAnimKey: string | null = null
   private lastDir: Dir | null = null
-  private keys?: WasdKeys
+  private heldKeys = new Set<string>()
 
   constructor() {
     super({ key: 'ArenaScene' })
@@ -96,7 +89,7 @@ export class ArenaScene extends Phaser.Scene {
     this.moving = false
     this.currentAnimKey = null
     this.lastDir = null
-    this.keys = undefined
+    this.heldKeys.clear()
 
     this.cameras.main.setBackgroundColor('#222222')
 
@@ -131,20 +124,22 @@ export class ArenaScene extends Phaser.Scene {
 
     const keyboard = this.input.keyboard
     if (!keyboard) return
-    this.keys = keyboard.addKeys('W,A,S,D') as WasdKeys
 
-    keyboard.on('keydown-W', () => { if (this.tryMove(0, -1)) this.startWalk('up') })
-    keyboard.on('keydown-S', () => { if (this.tryMove(0, 1))  this.startWalk('down') })
-    keyboard.on('keydown-A', () => { if (this.tryMove(-1, 0)) this.startWalk('left') })
-    keyboard.on('keydown-D', () => { if (this.tryMove(1, 0))  this.startWalk('right') })
+    // Track held keys with a Set (no addKey/addKeys: that would make Phaser
+    // suppress repeat 'keydown-X' events, so holding a key would only move once).
+    keyboard.on('keydown-W', () => { this.heldKeys.add('W'); if (this.tryMove(0, -1)) this.startWalk('up') })
+    keyboard.on('keydown-S', () => { this.heldKeys.add('S'); if (this.tryMove(0, 1))  this.startWalk('down') })
+    keyboard.on('keydown-A', () => { this.heldKeys.add('A'); if (this.tryMove(-1, 0)) this.startWalk('left') })
+    keyboard.on('keydown-D', () => { this.heldKeys.add('D'); if (this.tryMove(1, 0))  this.startWalk('right') })
+    keyboard.on('keyup-W', () => this.heldKeys.delete('W'))
+    keyboard.on('keyup-S', () => this.heldKeys.delete('S'))
+    keyboard.on('keyup-A', () => this.heldKeys.delete('A'))
+    keyboard.on('keyup-D', () => this.heldKeys.delete('D'))
   }
 
   update(time: number) {
-    if (!this.moving || !this.keys) return
-    const anyHeld =
-      this.keys.W.isDown || this.keys.A.isDown ||
-      this.keys.S.isDown || this.keys.D.isDown
-    if (anyHeld) return
+    if (!this.moving) return
+    if (this.heldKeys.size > 0) return
     if (time - this.lastMoveAt <= IDLE_TIMEOUT_MS) return
 
     this.charSprite.stop()
