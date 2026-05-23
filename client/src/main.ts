@@ -1,7 +1,7 @@
 import Phaser from 'phaser'
 import { ArenaScene } from './scenes/ArenaScene'
 
-new Phaser.Game({
+const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'game',
   width: window.innerWidth,
@@ -13,3 +13,7 @@ new Phaser.Game({
   },
   scene: [ArenaScene],
 })
+
+// Expose for headless test drivers (CDP can grab the scene to invoke
+// keyboard macros directly when raw key dispatch is unreliable).
+;(window as unknown as { game: Phaser.Game }).game = game
