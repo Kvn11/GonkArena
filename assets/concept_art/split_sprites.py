@@ -1,8 +1,14 @@
-"""Split character_sprite_sheet.png into individual sprites with transparent background.
+"""Split sprite sheets into individual sprites with transparent background.
 
-Bounding boxes were detected via ink-projection analysis. Background is removed by
-flood-filling from the cropped image's corners, which preserves any gray pixels
-that happen to sit inside the sprite (e.g., shading on the shorts).
+Two sheet formats are supported:
+
+* SPRITES — hand-picked bounding boxes inside `character_sprite_sheet.png`
+  (the original mixed-pose sheet).
+* GRIDS — uniform 3×2 grids of walking frames (one sheet per direction).
+
+Background is removed by flood-filling from each cropped image's corners,
+which preserves any gray pixels that happen to sit inside the sprite (e.g.,
+shading on the shorts).
 """
 from PIL import Image
 from collections import deque
@@ -10,20 +16,23 @@ from collections import deque
 SHEET = "assets/concept_art/character_sprite_sheet.png"
 OUT_DIR = "assets/concept_art/sprites"
 
-# Detected sprite bounding boxes: (name, x0, y0, x1, y1)
+# Hand-picked bboxes inside character_sprite_sheet.png: (name, x0, y0, x1, y1)
 ROW1_Y = (142, 486)
 ROW2_Y = (607, 945)
 SPRITES = [
     ("01_idle_front",      79, *(ROW1_Y[:1]),  220, ROW1_Y[1]),
     ("02_idle_three_qtr", 309, ROW1_Y[0],      438, ROW1_Y[1]),
-    ("03_walk_1",         552, ROW1_Y[0],      683, ROW1_Y[1]),
-    ("04_walk_2",         765, ROW1_Y[0],      920, ROW1_Y[1]),
-    ("05_walk_3",         999, ROW1_Y[0],     1150, ROW1_Y[1]),
-    ("06_walk_4",        1222, ROW1_Y[0],     1356, ROW1_Y[1]),
     ("07_fighting_stance",123, ROW2_Y[0],      316, ROW2_Y[1]),
     ("08_punch",          461, ROW2_Y[0],      717, ROW2_Y[1]),
     ("09_kick",           780, ROW2_Y[0],     1045, ROW2_Y[1]),
     ("10_hurt",          1127, ROW2_Y[0],     1324, ROW2_Y[1]),
+]
+
+# Uniform grid sheets: 3 columns × 2 rows = 6 frames each, row-major.
+GRIDS = [
+    ("walking_left",  "assets/concept_art/walking_left_sprite_sheet.png",  3, 2),
+    ("walking_up",    "assets/concept_art/walking_up_sprite_sheet.png",    3, 2),
+    ("walking_down",  "assets/concept_art/walking_down_sprite_sheet.png",  3, 2),
 ]
 
 MARGIN = 6           # pixels of padding around each cropped sprite
@@ -89,24 +98,52 @@ def remove_background(im):
     return rgba
 
 
-def main():
-    sheet = Image.open(SHEET)
+def split_named(sheet, sprites):
     W, H = sheet.size
-    for name, x0, y0, x1, y1 in SPRITES:
-        # Pad with margin, clamp to image bounds.
+    for name, x0, y0, x1, y1 in sprites:
         cx0 = max(0, x0 - MARGIN)
         cy0 = max(0, y0 - MARGIN)
         cx1 = min(W - 1, x1 + MARGIN)
         cy1 = min(H - 1, y1 + MARGIN)
         crop = sheet.crop((cx0, cy0, cx1 + 1, cy1 + 1))
         out = remove_background(crop)
-        # Trim back to the tight content bbox after BG removal.
         bbox = out.getbbox()
         if bbox:
             out = out.crop(bbox)
         path = f"{OUT_DIR}/{name}.png"
         out.save(path)
         print(f"  saved {path}  ({out.size[0]}x{out.size[1]})")
+
+
+def split_grid(prefix, sheet_path, cols, rows):
+    sheet = Image.open(sheet_path)
+    W, H = sheet.size
+    cw, ch = W // cols, H // rows
+    i = 0
+    for r in range(rows):
+        for c in range(cols):
+            i += 1
+            x0 = c * cw
+            y0 = r * ch
+            x1 = (c + 1) * cw - 1 if c < cols - 1 else W - 1
+            y1 = (r + 1) * ch - 1 if r < rows - 1 else H - 1
+            crop = sheet.crop((x0, y0, x1 + 1, y1 + 1))
+            out = remove_background(crop)
+            bbox = out.getbbox()
+            if bbox:
+                out = out.crop(bbox)
+            path = f"{OUT_DIR}/{prefix}_{i}.png"
+            out.save(path)
+            print(f"  saved {path}  ({out.size[0]}x{out.size[1]})")
+
+
+def main():
+    print(f"splitting {SHEET}")
+    split_named(Image.open(SHEET), SPRITES)
+    for prefix, sheet_path, cols, rows in GRIDS:
+        print(f"splitting {sheet_path}")
+        split_grid(prefix, sheet_path, cols, rows)
+
 
 if __name__ == "__main__":
     main()
