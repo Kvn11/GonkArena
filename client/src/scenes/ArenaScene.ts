@@ -24,7 +24,16 @@ import { worldToScreen } from '../iso'
 const TARGET_H = TILE_H * 3
 const IDLE_TIMEOUT_MS = 150
 
+// Starting tile for the static AI character — placed visibly to the world-east
+// of the player so a fresh player can immediately see them and walk into them.
+const AI_SPAWN_TILE = { x: 35, y: 32 }
+
 type Dir = 'up' | 'down' | 'left' | 'right'
+
+type Entity = {
+  tile: { x: number; y: number }
+  sprite: Phaser.GameObjects.Sprite
+}
 
 const ANIM_FOR_DIR: Record<Dir, 'walk_up' | 'walk_down' | 'walk_left'> = {
   up: 'walk_up',
@@ -42,14 +51,20 @@ const RESTING_FRAME_FOR_DIR: Record<Dir, string> = {
 }
 
 const WALK_FRAMES: Record<'walk_left' | 'walk_up' | 'walk_down', string[]> = {
-  walk_left: ['walk_left_1', 'walk_left_2', 'walk_left_3', 'walk_left_4', 'walk_left_5', 'walk_left_6'],
+  walk_left: ['walk_left_2', 'walk_left_3', 'walk_left_5', 'walk_left_6'],
   walk_up:   ['walk_up_1',   'walk_up_2',   'walk_up_3',   'walk_up_4',   'walk_up_5',   'walk_up_6'],
   walk_down: ['walk_down_1', 'walk_down_2', 'walk_down_3', 'walk_down_4', 'walk_down_5', 'walk_down_6'],
 }
 
+const WALK_FPS: Record<keyof typeof WALK_FRAMES, number> = {
+  walk_left: 14,
+  walk_up: 8,
+  walk_down: 8,
+}
+
 export class ArenaScene extends Phaser.Scene {
-  private charTile = { x: START_TILE.x, y: START_TILE.y }
-  private charSprite!: Phaser.GameObjects.Sprite
+  private player!: Entity
+  private ai!: Entity
   private lastMoveAt = 0
   private moving = false
   private currentAnimKey: string | null = null
@@ -84,7 +99,6 @@ export class ArenaScene extends Phaser.Scene {
 
   create() {
     // Phaser reuses the Scene instance across restarts; re-init per-run state.
-    this.charTile = { x: START_TILE.x, y: START_TILE.y }
     this.lastMoveAt = 0
     this.moving = false
     this.currentAnimKey = null
@@ -95,22 +109,22 @@ export class ArenaScene extends Phaser.Scene {
 
     this.drawArena()
 
-    const { sx, sy } = worldToScreen(this.charTile.x, this.charTile.y)
-    this.charSprite = this.add.sprite(sx, sy, 'idle').setOrigin(0.5, 1)
-    this.resizeSpriteToTarget()
+    this.player = this.spawnEntity(START_TILE.x, START_TILE.y)
+    this.ai = this.spawnEntity(AI_SPAWN_TILE.x, AI_SPAWN_TILE.y)
 
     for (const key of Object.keys(WALK_FRAMES) as Array<keyof typeof WALK_FRAMES>) {
       if (!this.anims.exists(key)) {
         this.anims.create({
           key,
           frames: WALK_FRAMES[key].map((k) => ({ key: k })),
-          frameRate: 8,
+          frameRate: WALK_FPS[key],
           repeat: -1,
         })
       }
     }
 
-    this.charSprite.on('animationupdate', () => this.resizeSpriteToTarget())
+    // Only the player runs animations right now; AI is static.
+    this.player.sprite.on('animationupdate', () => this.resizeSprite(this.player.sprite))
 
     const halfW = (GRID_SIZE * TILE_W) / 2
     const fullH = GRID_SIZE * TILE_H
@@ -120,7 +134,7 @@ export class ArenaScene extends Phaser.Scene {
       GRID_SIZE * TILE_W + TILE_W * 2,
       fullH + TILE_H * 2,
     )
-    this.cameras.main.startFollow(this.charSprite, true)
+    this.cameras.main.startFollow(this.player.sprite, true)
 
     const keyboard = this.input.keyboard
     if (!keyboard) return
@@ -142,15 +156,16 @@ export class ArenaScene extends Phaser.Scene {
     if (this.heldKeys.size > 0) return
     if (time - this.lastMoveAt <= IDLE_TIMEOUT_MS) return
 
-    this.charSprite.stop()
+    const sprite = this.player.sprite
+    sprite.stop()
     if (this.lastDir === null) {
-      this.charSprite.setTexture('idle')
-      this.charSprite.setFlipX(false)
+      sprite.setTexture('idle')
+      sprite.setFlipX(false)
     } else {
-      this.charSprite.setTexture(RESTING_FRAME_FOR_DIR[this.lastDir])
-      this.charSprite.setFlipX(this.lastDir === 'right')
+      sprite.setTexture(RESTING_FRAME_FOR_DIR[this.lastDir])
+      sprite.setFlipX(this.lastDir === 'right')
     }
-    this.resizeSpriteToTarget()
+    this.resizeSprite(sprite)
     this.moving = false
     this.currentAnimKey = null
   }
@@ -178,16 +193,42 @@ export class ArenaScene extends Phaser.Scene {
     }
   }
 
+  private spawnEntity(tx: number, ty: number): Entity {
+    const { sx, sy } = worldToScreen(tx, ty)
+    const sprite = this.add.sprite(sx, sy, 'idle').setOrigin(0.5, 1)
+    this.resizeSprite(sprite)
+    const entity: Entity = { tile: { x: tx, y: ty }, sprite }
+    this.updateDepth(entity)
+    return entity
+  }
+
+  // Iso depth: characters with feet lower on screen are closer to the viewer
+  // and must render on top. Setting depth = screen-y of the sprite's feet
+  // achieves that with a single ordering function.
+  private updateDepth(e: Entity) {
+    const { sy } = worldToScreen(e.tile.x, e.tile.y)
+    e.sprite.setDepth(sy)
+  }
+
+  private isOccupied(tx: number, ty: number, exclude?: Entity): boolean {
+    for (const e of [this.player, this.ai]) {
+      if (!e || e === exclude) continue
+      if (e.tile.x === tx && e.tile.y === ty) return true
+    }
+    return false
+  }
+
   private startWalk(dir: Dir) {
     const flip = dir === 'right'
     const animKey = ANIM_FOR_DIR[dir]
-    this.charSprite.setFlipX(flip)
+    const sprite = this.player.sprite
+    sprite.setFlipX(flip)
     this.lastDir = dir
     if (!this.moving || this.currentAnimKey !== animKey) {
-      this.charSprite.play(animKey)
+      sprite.play(animKey)
       // Phaser skips ANIMATION_UPDATE for the first frame of a freshly-played anim;
       // size it explicitly so frame 1 isn't drawn at the previous texture's aspect.
-      this.resizeSpriteToTarget()
+      this.resizeSprite(sprite)
       this.currentAnimKey = animKey
       this.moving = true
     }
@@ -198,18 +239,20 @@ export class ArenaScene extends Phaser.Scene {
     this.lastMoveAt = this.time.now
   }
 
-  private resizeSpriteToTarget() {
-    const aspect = this.charSprite.width / this.charSprite.height
-    this.charSprite.setDisplaySize(TARGET_H * aspect, TARGET_H)
+  private resizeSprite(sprite: Phaser.GameObjects.Sprite) {
+    const aspect = sprite.width / sprite.height
+    sprite.setDisplaySize(TARGET_H * aspect, TARGET_H)
   }
 
   private tryMove(dx: number, dy: number): boolean {
-    const nx = this.charTile.x + dx
-    const ny = this.charTile.y + dy
+    const nx = this.player.tile.x + dx
+    const ny = this.player.tile.y + dy
     if (nx < 0 || nx >= GRID_SIZE || ny < 0 || ny >= GRID_SIZE) return false
-    this.charTile = { x: nx, y: ny }
+    if (this.isOccupied(nx, ny, this.player)) return false
+    this.player.tile = { x: nx, y: ny }
     const { sx, sy } = worldToScreen(nx, ny)
-    this.charSprite.setPosition(sx, sy)
+    this.player.sprite.setPosition(sx, sy)
+    this.updateDepth(this.player)
     return true
   }
 }
